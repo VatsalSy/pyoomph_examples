@@ -124,6 +124,8 @@ with LiquidBridgeProblem() as problem:
     
     # All eigensolvers fail quite badly for this problem, so we use scipy, which at least gives any starting guess
     problem.set_eigensolver("scipy")        
+    # The guess can be entirely wrong and depends on the random init vector. So sometimes, the first step fails, i.e. one has to rerun
+    # Best way would be compiling slepc with complex support and try it with slepc
     problem.solve_eigenproblem(azimuthal_m=1,n=6)
     # Jump on the bifurcation
     problem.activate_bifurcation_tracking("Vhat","azimuthal",azimuthal_mode=1)
