@@ -1,6 +1,6 @@
 # Information
 
-This repository contains particular implementations with [pyoomph](https://www.github.com/cdiddens/pyoomph), which we used in our publications:
+This repository contains particular implementations with [pyoomph](https://www.github.com/pyoomph/pyoomph), which we used in our publications:
 
 Install pyoomph before running the scripts.
 
