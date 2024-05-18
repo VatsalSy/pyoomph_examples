@@ -133,9 +133,13 @@ with LiquidBridgeProblem() as problem:
     outfile=NumericalTextOutputFile(problem.get_output_directory("steiner.txt"),header=["L","Vhat","p"])
     dL=0.01
     outfile.add_row(problem.L,problem.Vhat,problem.get_ode("globals").get_value("p"))
+    problem.set_arc_length_parameter(Desired_newton_iterations_ds=8)
     while problem.L.value<3:
         dL=problem.arclength_continuation("L",dL)        
         problem.output()
-        outfile.add_row(problem.L,problem.Vhat,problem.get_ode("globals").get_value("p"))
-        problem.reset_arc_length_parameters()
+        outfile.add_row(problem.L,problem.Vhat,problem.get_ode("globals").get_value("p"))        
+        # Reset bifurcation tracking to update the normalization vector
+        #problem.reset_arc_length_parameters()
+        #problem.deactivate_bifurcation_tracking()
+        #problem.activate_bifurcation_tracking("Vhat","azimuthal",azimuthal_mode=1)
     
