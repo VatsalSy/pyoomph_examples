@@ -58,11 +58,11 @@ class YoungLaplaceEquation(Equations):
         kappa,kappatest=var_and_test("kappa")
         self.add_weak(kappa+div(pn),kappatest)
         # Young-Laplace equation by normally shifting the nodes
-        self.add_weak(kappa-self.p,-dot(pn,testfunction("mesh")))
+        self.add_weak(kappa-self.p,-dot(n,testfunction("mesh")))
         # Tangentially, we shift the nodes so that the position with respect to the normalized arclength is preserved
         s,stest=var_and_test("normalized_s")                
-        self.add_weak(grad(s)/var("coordinate_x"),grad(stest),coordinate_system=cartesian)
-        t=vector(-pn[1],pn[0])
+        self.add_weak(grad(s),grad(stest))
+        t=vector(-n[1],n[0])
         self.add_weak(s-var("lagrangian_x") , dot(t,testfunction("mesh")))
         
         
@@ -109,14 +109,15 @@ class LiquidBridgeProblem(Problem):
 
 with LiquidBridgeProblem() as problem:
     # The generated code is quite large (>1 MB), takes some time for compilation
-    # Also, GiNaC does not always give the same term order. Normally, it is not an issue, but here it can be
-    problem.set_c_compiler("system") # .optimize_for_max_speed() # So we do not use ffast-math
-    #problem.set_c_compiler("tcc") # Use tcc for faster compilation, but slower execution
+    problem.set_c_compiler("system").optimize_for_max_speed() 
     
     # Activate azimuthal stability analysis
     problem.setup_for_stability_analysis(azimuthal_stability=True)
     
-    problem+=TextFileOutput()@"interface/bottom"
+    from pyoomph.meshes.meshdatacache import MeshDataCombineWithEigenfunction
+    # Add solution with eigenfunction. Can be used in combination with the Paraview filter at pyoomph.paraview.pyoomph_eigen_extrusion_filter.py
+    # for a plot of the eigenfunction
+    problem+=MeshFileOutput(operator=MeshDataCombineWithEigenfunction(0))@"interface"
     
     # Solve and go close to the bifurcation point
     problem.solve()        
@@ -124,24 +125,33 @@ with LiquidBridgeProblem() as problem:
     
     # All eigensolvers fail quite badly for this problem, so we use scipy, which at least gives any starting guess
     problem.set_eigensolver("scipy")        
-    # The guess can be entirely wrong and depends on the random init vector. So sometimes, the first step fails, i.e. one has to rerun
-    # Best way would be compiling slepc with complex support and try it with slepc
-    problem.solve_eigenproblem(azimuthal_m=1,n=6)
-    # Jump on the bifurcation
+    # The guess can be entirely wrong and depends on the random init vector. 
+    # We try several times to get a any convergent guess
+    Vhat0=problem.Vhat.value # backup values. The will be restored in case of a failure
+    dofs,_posdofs=problem.get_current_dofs()
+    while True:
+        try:
+            problem.solve_eigenproblem(azimuthal_m=1,n=6) # Get any guess
+            # Jump on the bifurcation
+            problem.activate_bifurcation_tracking("Vhat","azimuthal",azimuthal_mode=1)
+            problem.solve()
+            break
+        except:
+            problem.deactivate_bifurcation_tracking()
+            problem.set_current_dofs(dofs)
+            problem.Vhat.value=Vhat0    
+            
+    # Now we have an good eigenvector, reactivate bifurcation tracking with this to have a good normalization constraint
+    problem.deactivate_bifurcation_tracking()            
     problem.activate_bifurcation_tracking("Vhat","azimuthal",azimuthal_mode=1)
-    problem.solve(max_newton_iterations=40)
+    problem.solve()    
     
     # Scan the curve
     outfile=NumericalTextOutputFile(problem.get_output_directory("steiner.txt"),header=["L","Vhat","p"])
     dL=0.01
     outfile.add_row(problem.L,problem.Vhat,problem.get_ode("globals").get_value("p"))
-    problem.set_arc_length_parameter(Desired_newton_iterations_ds=8)
-    while problem.L.value<3:
-        dL=problem.arclength_continuation("L",dL)        
+    while problem.L.value<5:
+        dL=problem.arclength_continuation("L",dL,max_ds=0.02)        
         problem.output()
-        outfile.add_row(problem.L,problem.Vhat,problem.get_ode("globals").get_value("p"))        
-        # Reset bifurcation tracking to update the normalization vector
-        #problem.reset_arc_length_parameters()
-        #problem.deactivate_bifurcation_tracking()
-        #problem.activate_bifurcation_tracking("Vhat","azimuthal",azimuthal_mode=1)
+        outfile.add_row(problem.L,problem.Vhat,problem.get_ode("globals").get_value("p"))                
     
