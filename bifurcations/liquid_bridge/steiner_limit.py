@@ -5,7 +5,7 @@
 #  @section LICENSE
 # 
 #  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
-#  Copyright (C) 2021-2024  Christian Diddens & Duarte Rocha
+#  Copyright (C) 2021-2025  Christian Diddens & Duarte Rocha
 # 
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -29,44 +29,9 @@
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.utils.num_text_out import NumericalTextOutputFile
-
-class YoungLaplaceEquation(Equations):
-    def __init__(self,p):
-        super().__init__()
-        self.p=p # Store the liquid pressure
-        
-    def define_fields(self):
-        # Moving mesh
-        self.activate_coordinates_as_dofs("C2")
-        # Projected normal
-        self.define_vector_field("proj_n","C2")
-        # Curvature
-        self.define_scalar_field("kappa","C2")
-        # Normalized arclength for tangnetial nodal placements
-        self.define_scalar_field("normalized_s","C2")
-        
-    def define_residuals(self):
-        # Project the element normal to a continuous normal field
-        pn,pntest=var_and_test("proj_n")
-        n=var("normal")
-        self.add_weak(pn-n,pntest)
-        # We need initial conditions, otherwise the following normalization will initially fail
-        self.set_initial_condition("proj_n_x",-1)
-        self.set_initial_condition("proj_n_y",0)
-        pn=pn/square_root(dot(pn,pn))
-        # The curvature is the divergence of the projected normal
-        kappa,kappatest=var_and_test("kappa")
-        self.add_weak(kappa+div(pn),kappatest)
-        # Young-Laplace equation by normally shifting the nodes
-        self.add_weak(kappa-self.p,-dot(n,testfunction("mesh")))
-        # Tangentially, we shift the nodes so that the position with respect to the normalized arclength is preserved
-        s,stest=var_and_test("normalized_s")                
-        self.add_weak(grad(s),grad(stest))
-        t=vector(-n[1],n[0])
-        self.add_weak(s-var("lagrangian_x") , dot(t,testfunction("mesh")))
-        
-        
-        
+from pyoomph.equations.ALE import *
+from pyoomph.equations.navier_stokes import *
+from pyoomph.meshes.remesher import Remesher2d        
         
 class LiquidBridgeProblem(Problem):
     def __init__(self):
@@ -76,82 +41,71 @@ class LiquidBridgeProblem(Problem):
                 
     def define_problem(self):
         # Axisymmetric coordinate system. Only axisymmetric contributions will be expanded for azimuthal stability analysis
-        self.set_coordinate_system("axisymmetric")
+        self.set_coordinate_system("axisymmetric")        
+        # Attach the mesh with a remesher
+        mesh=RectangularQuadMesh(size=[1,self.L],N=[10,10]) # Rather coarse mesh here
+        mesh.remesher=Remesher2d(mesh)
+        self+=mesh                
         
-        # A line mesh embedded in a 2d domain. Will be rotated by the InitialCondition
-        self+=LineMesh(N=60,size=1,nodal_dimension=2,name="interface",left_name="bottom",right_name="top")       
-                
+        # Bulk equations: Just Stokes flow on a Laplace-smoothed mesh
+        eqs=StokesEquations()
+        eqs+=LaplaceSmoothedMesh()    
+                                        
+        # Top and bottom: No-slip, fixed x-coordinate and y=0 (bottom) and enforce y=L (top)
+        eqs+=(NoSlipBC()+DirichletBC(mesh_x=True)+EnforcedDirichlet(mesh_y=self.L))@"top" 
+        eqs+=(NoSlipBC()+DirichletBC(mesh_y=0,mesh_x=True))@"bottom"        
+        
+        # Side boundary conditions
+        eqs+=AxisymmetryBC()@"left"
+        eqs+=NavierStokesFreeSurface(surface_tension=1)@"right"        
+        
         # Adjust liquid pressure by the volume constraint
-        Vdest=(pi*self.L)*(self.Vhat-1/3)        
-        p,ptest=self.add_global_dof("p",equation_contribution=-Vdest,initial_condition=1)
+        Vdest=pi*self.L*self.Vhat
+        P,Ptest=self.add_global_dof("P",equation_contribution=-Vdest,initial_condition=1)            
+        eqs+=WeakContribution(1,Ptest)
+        eqs+=AverageConstraint(_kin_bc=P)@"right"+ DirichletBC(_kin_bc=0)@"right/top"
+        
+        eqs+=IntegralObservables(Pint=var("pressure"),Pavg=lambda Pint: Pint/Vdest)
+        
+        
+        eqs+=RemeshWhen(RemeshingOptions())
+        
                 
-        eqs=YoungLaplaceEquation(p)
-        # Initial condition: Rotate the mesh to range from (1,0) to (1,L), and set the curvature to 1 and initialize the arclength
-        eqs+=InitialCondition(mesh_x=1,mesh_y=var("lagrangian_x")*self.L,kappa=1,normalized_s=var("lagrangian_x"))
-        # Output
-        eqs+=TextFileOutput()
-        
-        # Boundary conditions: Fix the contact line, the bottom and set the top height to L. Also fix the normalized arclength
-        eqs+=DirichletBC(mesh_x=1)@["top","bottom"]                
-        eqs+=DirichletBC(normalized_s=0,mesh_y=0)@"bottom"
-        eqs+=(DirichletBC(normalized_s=1)+EnforcedBC(mesh_y=self.L-var("mesh_y")))@"top"
-        
-        # Volume calculation
-        eqs+=WeakContribution(-1/3*dot(var("coordinate"),var("normal")),ptest)
-            
-        
-        # Add some temporal dynamics for the mass matrix
-        eqs+=WeakContribution(-partial_t(var("mesh")),testfunction("mesh"))
-        
-        
-        self+=eqs@"interface"
+        self+=eqs@"domain"
         
 
 with LiquidBridgeProblem() as problem:
-    # The generated code is quite large (>1 MB), takes some time for compilation
+    from pyoomph.solvers.petsc import *
+    problem.set_eigensolver("slepc").use_mumps()    
     problem.set_c_compiler("system").optimize_for_max_speed() 
     
-    # Activate azimuthal stability analysis
     problem.setup_for_stability_analysis(azimuthal_stability=True)
     
-    from pyoomph.meshes.meshdatacache import MeshDataCombineWithEigenfunction
-    # Add solution with eigenfunction. Can be used in combination with the Paraview filter at pyoomph.paraview.pyoomph_eigen_extrusion_filter.py
-    # for a plot of the eigenfunction
-    problem+=MeshFileOutput(operator=MeshDataCombineWithEigenfunction(0))@"interface"
+    from pyoomph.meshes.meshdatacache import MeshDataCombineWithEigenfunction    
+    problem+=MeshFileOutput(operator=MeshDataCombineWithEigenfunction(0))@"domain"
     
     # Solve and go close to the bifurcation point
-    problem.solve()        
+    
+    problem.Vhat.value=1.05
+    problem.solve()     
+    problem.go_to_param(Vhat=1.5)        
+    problem.force_remesh()    
     problem.go_to_param(Vhat=1.86)    
-    
-    # All eigensolvers fail quite badly for this problem, so we use scipy, which at least gives any starting guess
-    problem.set_eigensolver("scipy")        
-    # The guess can be entirely wrong and depends on the random init vector. 
-    # We try several times to get a any convergent guess
-    Vhat0=problem.Vhat.value # backup values. The will be restored in case of a failure
-    dofs,_posdofs=problem.get_current_dofs()
-    while True:
-        try:
-            problem.solve_eigenproblem(azimuthal_m=1,n=6) # Get any guess
-            # Jump on the bifurcation
-            problem.activate_bifurcation_tracking("Vhat","azimuthal",azimuthal_mode=1)
-            problem.solve()
-            break
-        except:
-            problem.deactivate_bifurcation_tracking()
-            problem.set_current_dofs(dofs)
-            problem.Vhat.value=Vhat0    
+    problem.force_remesh()    
+    problem.solve()
             
-    # Now we have an good eigenvector, reactivate bifurcation tracking with this to have a good normalization constraint
-    problem.deactivate_bifurcation_tracking()            
+    problem.solve_eigenproblem(azimuthal_m=1,n=6,report_accuracy=True) # Get any guess
+    # Switch on bifurcation tracking
     problem.activate_bifurcation_tracking("Vhat","azimuthal",azimuthal_mode=1)
-    problem.solve()    
-    
+    problem.solve()        
     # Scan the curve
     outfile=NumericalTextOutputFile(problem.get_output_directory("steiner.txt"),header=["L","Vhat","p"])
-    dL=0.01
-    outfile.add_row(problem.L,problem.Vhat,problem.get_ode("globals").get_value("p"))
+    outfile.add_row(problem.L,problem.Vhat,problem.get_mesh("domain").evaluate_observable("Pavg"))                
+    problem.output_at_increased_time()
+    dL=0.01    
     while problem.L.value<5:
-        dL=problem.arclength_continuation("L",dL,max_ds=0.02)        
-        problem.output()
-        outfile.add_row(problem.L,problem.Vhat,problem.get_ode("globals").get_value("p"))                
+        dL=problem.arclength_continuation("L",dL)         
+        problem.remesh_handler_during_continuation(resolve_max_newton_steps=50,resolve_globally_convergent_newton=True)
+        outfile.add_row(problem.L,problem.Vhat,problem.get_mesh("domain").evaluate_observable("Pavg"))                
+        problem.output_at_increased_time()        
     
